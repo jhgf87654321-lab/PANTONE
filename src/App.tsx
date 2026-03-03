@@ -158,47 +158,46 @@ const ImageUploader = ({ onColorsExtracted }: { onColorsExtracted: (colors: RGB[
       setPreview(reader.result as string);
 
       try {
-        // Use KIE AI API
-        const apiKey = import.meta.env.VITE_KIE_API_KEY || import.meta.env.GEMINI_API_KEY;
-        console.log("API Key loaded:", apiKey ? apiKey.substring(0, 10) + "..." : "NOT FOUND");
+        // Use Google Gemini API directly
+        const apiKey = import.meta.env.GEMINI_API_KEY;
+        console.log("Gemini API Key loaded:", apiKey ? apiKey.substring(0, 10) + "..." : "NOT FOUND");
 
         if (!apiKey) {
-          throw new Error("API key not configured. Please set VITE_KIE_API_KEY or GEMINI_API_KEY in your environment.");
+          throw new Error("API key not configured. Please set GEMINI_API_KEY in your environment.");
         }
 
-        // Build the image URL in base64 format for KIE AI
-        const imageDataUrl = `data:${file.type};base64,${base64Data}`;
-
-        // Use KIE AI API - try gemini-3-pro (without -preview suffix)
-        const response = await fetch("https://api.kie.ai/gemini-3-pro/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${apiKey}`
-          },
-          body: JSON.stringify({
-            messages: [
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "text",
-                    text: "Analyze this image and extract the 5 most dominant or visually significant colors. Return ONLY a JSON array of objects, where each object has 'r', 'g', and 'b' integer properties representing the RGB values. Example format: [{\"r\":255,\"g\":0,\"b\":0},{\"r\":0,\"g\":255,\"b\":0}]. Do not include any other text or explanation."
-                  },
-                  {
-                    type: "image_url",
-                    image_url: {
-                      url: imageDataUrl
+        // Gemini expects the image as inline data in generateContent
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              contents: [
+                {
+                  parts: [
+                    {
+                      text:
+                        "Analyze this image and extract the 5 most dominant or visually significant colors. " +
+                        "Return ONLY a JSON array of objects, where each object has 'r', 'g', and 'b' integer properties " +
+                        "representing the RGB values. Example format: [{\"r\":255,\"g\":0,\"b\":0},{\"r\":0,\"g\":255,\"b\":0}]. " +
+                        "Do not include any other text or explanation."
+                    },
+                    {
+                      inline_data: {
+                        mime_type: file.type,
+                        data: base64Data
+                      }
                     }
-                  }
-                ]
-              }
-            ],
-            stream: false,
-            include_thoughts: false
-          }),
-          signal: AbortSignal.timeout(180000) // 180 second timeout
-        });
+                  ]
+                }
+              ]
+            }),
+            signal: AbortSignal.timeout(180000) // 180 second timeout
+          }
+        );
 
         if (!response.ok) {
           const errorText = await response.text();
@@ -212,24 +211,30 @@ const ImageUploader = ({ onColorsExtracted }: { onColorsExtracted: (colors: RGB[
 
         // Handle response
         const data = await response.json();
-        console.log("KIE AI API Response:", JSON.stringify(data, null, 2));
+        console.log("Gemini API Response:", JSON.stringify(data, null, 2));
 
         // Check for API errors in response
         if (data.error) {
           throw new Error(data.error.message || data.error.toString());
         }
 
-        const content = data.choices?.[0]?.message?.content || '';
-        console.log("Response content:", content);
+        // Gemini text output
+        const textContent =
+          data.candidates?.[0]?.content?.parts
+            ?.map((p: { text?: string }) => p.text || "")
+            .join(" ")
+            .trim() || "";
+
+        console.log("Response content:", textContent);
 
         let colors = [];
-        if (content) {
+        if (textContent) {
           try {
-            colors = JSON.parse(content);
+            colors = JSON.parse(textContent);
           } catch (parseErr) {
             console.error("JSON parse error:", parseErr);
-            // Try to extract JSON from response if it's wrapped in markdown
-            const jsonMatch = content.match(/\[[\s\S]*\]/);
+            // Try to extract JSON from response if it's wrapped in markdown or extra text
+            const jsonMatch = textContent.match(/\[[\s\S]*\]/);
             if (jsonMatch) {
               try {
                 colors = JSON.parse(jsonMatch[0]);
