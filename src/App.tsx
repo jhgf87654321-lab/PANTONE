@@ -143,8 +143,9 @@ const ImageUploader = ({ onColorsExtracted }: { onColorsExtracted: (colors: RGB[
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
 
-  const handleFile = async (file: File) => {
-    if (!file.type.startsWith("image/")) {
+  const handleFile = async (file: File | undefined) => {
+    if (!file) return;
+    if (!file.type?.startsWith("image/")) {
       setError("Please upload an image file.");
       return;
     }
@@ -158,46 +159,18 @@ const ImageUploader = ({ onColorsExtracted }: { onColorsExtracted: (colors: RGB[
       setPreview(reader.result as string);
 
       try {
-        // Use Google Gemini API directly
-        const apiKey = import.meta.env.GEMINI_API_KEY;
-        console.log("Gemini API Key loaded:", apiKey ? apiKey.substring(0, 10) + "..." : "NOT FOUND");
-
-        if (!apiKey) {
-          throw new Error("API key not configured. Please set GEMINI_API_KEY in your environment.");
-        }
-
-        // Gemini expects the image as inline data in generateContent
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              contents: [
-                {
-                  parts: [
-                    {
-                      text:
-                        "Analyze this image and extract the 5 most dominant or visually significant colors. " +
-                        "Return ONLY a JSON array of objects, where each object has 'r', 'g', and 'b' integer properties " +
-                        "representing the RGB values. Example format: [{\"r\":255,\"g\":0,\"b\":0},{\"r\":0,\"g\":255,\"b\":0}]. " +
-                        "Do not include any other text or explanation."
-                    },
-                    {
-                      inline_data: {
-                        mime_type: file.type,
-                        data: base64Data
-                      }
-                    }
-                  ]
-                }
-              ]
-            }),
-            signal: AbortSignal.timeout(180000) // 180 second timeout
-          }
-        );
+        // Call backend API which proxies to Google Gemini
+        const response = await fetch("/api/gemini-colors", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            mimeType: file.type,
+            base64: base64Data
+          }),
+          signal: AbortSignal.timeout(180000) // 180 second timeout
+        });
 
         if (!response.ok) {
           const errorText = await response.text();
@@ -209,41 +182,14 @@ const ImageUploader = ({ onColorsExtracted }: { onColorsExtracted: (colors: RGB[
           throw new Error((errorData.msg as string) || (errorData.message as string) || `API request failed with status ${response.status}: ${errorText}`);
         }
 
-        // Handle response
         const data = await response.json();
-        console.log("Gemini API Response:", JSON.stringify(data, null, 2));
+        console.log("Gemini proxy API Response:", JSON.stringify(data, null, 2));
 
-        // Check for API errors in response
         if (data.error) {
-          throw new Error(data.error.message || data.error.toString());
+          throw new Error(data.error);
         }
 
-        // Gemini text output
-        const textContent =
-          data.candidates?.[0]?.content?.parts
-            ?.map((p: { text?: string }) => p.text || "")
-            .join(" ")
-            .trim() || "";
-
-        console.log("Response content:", textContent);
-
-        let colors = [];
-        if (textContent) {
-          try {
-            colors = JSON.parse(textContent);
-          } catch (parseErr) {
-            console.error("JSON parse error:", parseErr);
-            // Try to extract JSON from response if it's wrapped in markdown or extra text
-            const jsonMatch = textContent.match(/\[[\s\S]*\]/);
-            if (jsonMatch) {
-              try {
-                colors = JSON.parse(jsonMatch[0]);
-              } catch (e) {
-                console.error("Failed to parse extracted JSON:", e);
-              }
-            }
-          }
-        }
+        const colors = data.colors || [];
 
         if (colors && colors.length > 0) {
           onColorsExtracted(colors);
@@ -292,7 +238,7 @@ const ImageUploader = ({ onColorsExtracted }: { onColorsExtracted: (colors: RGB[
           type="file" 
           accept="image/*" 
           className="hidden" 
-          onChange={(e) => e.target.files && handleFile(e.target.files[0])}
+          onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
         />
         
         {preview ? (
@@ -331,6 +277,7 @@ function ProStudio() {
   const [range, setRange] = useState(30); // HSB distance range
   const [selectedPantone, setSelectedPantone] = useState<PantoneColor | null>(null);
   const [extractedColors, setExtractedColors] = useState<RGB[]>([]);
+  const [apiCopied, setApiCopied] = useState(false);
 
   const currentRgb = useMemo(() => hsbToRgb(hsb.h, hsb.s, hsb.b), [hsb]);
   const currentHex = useMemo(() => rgbToHex(currentRgb.r, currentRgb.g, currentRgb.b), [currentRgb]);
@@ -342,6 +289,15 @@ function ProStudio() {
       setHsb(firstColorHsb);
     }
   };
+
+  const apiUrl = useMemo(() => {
+    if (!selectedPantone) return "";
+    const origin =
+      typeof window !== "undefined" ? window.location.origin : "";
+    const base = origin.replace(/\/$/, "");
+    const hex = selectedPantone.hex.replace("#", "");
+    return `${base}/api/pantone-match?hex=${hex}`;
+  }, [selectedPantone]);
 
   const matches = useMemo(() => {
     const scored: ScoredPantone[] = pantoneData.map(color => {
@@ -631,6 +587,42 @@ function ProStudio() {
                           <p className="text-lg font-mono font-bold text-white">{selectedPantone.rgb.replace('rgb(', '').replace(')', '')}</p>
                         </div>
                       </div>
+
+                      {apiUrl && (
+                        <div className="mt-6 p-4 rounded-2xl bg-white/5 border border-white/10 text-left">
+                          <p className="text-[10px] text-zinc-500 uppercase font-bold tracking-widest mb-2">
+                            API Endpoint
+                          </p>
+                          <p className="text-[11px] text-zinc-400 mb-3">
+                            Use this URL from other sites to request the Pantone match for this color.
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <div className="flex-1 px-3 py-2 rounded-xl bg-black/40 border border-white/10 text-[11px] text-zinc-300 font-mono overflow-x-auto whitespace-nowrap">
+                              {apiUrl}
+                            </div>
+                            <button
+                              onClick={() => {
+                                navigator.clipboard.writeText(apiUrl);
+                                setApiCopied(true);
+                                setTimeout(() => setApiCopied(false), 1500);
+                              }}
+                              className="shrink-0 px-3 py-2 rounded-xl bg-indigo-500/20 border border-indigo-500/40 text-xs font-medium text-indigo-200 hover:bg-indigo-500/30 transition-colors flex items-center gap-1"
+                            >
+                              {apiCopied ? (
+                                <>
+                                  <Check size={14} className="text-emerald-400" />
+                                  Copied
+                                </>
+                              ) : (
+                                <>
+                                  <Copy size={14} />
+                                  Copy URL
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                 </motion.div>
@@ -658,6 +650,7 @@ function ProStudio() {
 function SimpleExtractor() {
   const [extractedColors, setExtractedColors] = useState<RGB[]>([]);
   const [selectedColor, setSelectedColor] = useState<RGB | null>(null);
+  const [apiCopied, setApiCopied] = useState(false);
 
   const handleColorsExtracted = (colors: RGB[]) => {
     setExtractedColors(colors);
@@ -688,6 +681,17 @@ function SimpleExtractor() {
       .sort((a, b) => a.distance - b.distance)
       .slice(0, 8);
   }, [selectedColor]);
+
+  const bestMatch = matches[0] ?? null;
+
+  const apiUrl = useMemo(() => {
+    if (!bestMatch) return "";
+    const origin =
+      typeof window !== "undefined" ? window.location.origin : "";
+    const base = origin.replace(/\/$/, "");
+    const hex = bestMatch.hex.replace("#", "");
+    return `${base}/api/pantone-match?hex=${hex}`;
+  }, [bestMatch]);
 
   const currentHex = selectedColor ? rgbToHex(selectedColor.r, selectedColor.g, selectedColor.b) : "#0a0a0a";
 
@@ -739,21 +743,59 @@ function SimpleExtractor() {
             </div>
 
             {selectedColor && (
-              <div>
-                <h2 className="text-2xl font-bold mb-8 text-center tracking-tight">Closest Pantone Matches</h2>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                  <AnimatePresence>
-                    {matches.map((match, idx) => (
-                      <ColorCard 
-                        key={match.code + idx} 
-                        color={match} 
-                        distance={match.distance} 
-                        isSelected={idx === 0}
-                        onClick={() => {}}
-                      />
-                    ))}
-                  </AnimatePresence>
+              <div className="space-y-8">
+                <div>
+                  <h2 className="text-2xl font-bold mb-8 text-center tracking-tight">Closest Pantone Matches</h2>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <AnimatePresence>
+                      {matches.map((match, idx) => (
+                        <ColorCard 
+                          key={match.code + idx} 
+                          color={match} 
+                          distance={match.distance} 
+                          isSelected={idx === 0}
+                          onClick={() => {}}
+                        />
+                      ))}
+                    </AnimatePresence>
+                  </div>
                 </div>
+
+                {bestMatch && apiUrl && (
+                  <div className="p-6 rounded-[2rem] bg-zinc-900/60 border border-white/5">
+                    <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-widest mb-3 text-center">
+                      API Endpoint for Best Match
+                    </h3>
+                    <p className="text-[11px] text-zinc-500 mb-4 text-center">
+                      Use this URL from other sites to request the Pantone match for the currently selected image color.
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 px-3 py-2 rounded-xl bg-black/40 border border-white/10 text-[11px] text-zinc-300 font-mono overflow-x-auto whitespace-nowrap">
+                        {apiUrl}
+                      </div>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(apiUrl);
+                          setApiCopied(true);
+                          setTimeout(() => setApiCopied(false), 1500);
+                        }}
+                        className="shrink-0 px-3 py-2 rounded-xl bg-indigo-500/20 border border-indigo-500/40 text-xs font-medium text-indigo-200 hover:bg-indigo-500/30 transition-colors flex items-center gap-1"
+                      >
+                        {apiCopied ? (
+                          <>
+                            <Check size={14} className="text-emerald-400" />
+                            Copied
+                          </>
+                        ) : (
+                          <>
+                            <Copy size={14} />
+                            Copy URL
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
